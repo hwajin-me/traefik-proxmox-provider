@@ -642,6 +642,13 @@ func applyHTTPServiceOptions(lb *dynamic.ServersLoadBalancer, service internal.S
 
 // Handle TLS configuration
 func handleRouterTLS(service internal.Service, prefix string) *dynamic.RouterTLSConfig {
+	// Check if TLS is explicitly disabled
+	if tlsLabel, exists := service.Config[prefix+".tls"]; exists {
+		if tlsLabel == "false" {
+			return nil
+		}
+	}
+
 	// Check if TLS is enabled
 	tlsEnabled := false
 	if tlsLabel, exists := service.Config[prefix+".tls"]; exists {
@@ -966,6 +973,13 @@ func getUDPServiceAddress(service internal.Service, serviceName string, nodeName
 
 // Handle TCP TLS configuration
 func handleTCPRouterTLS(service internal.Service, prefix string) *dynamic.RouterTCPTLSConfig {
+	// Check if TLS is explicitly disabled
+	if tlsLabel, exists := service.Config[prefix+".tls"]; exists {
+		if tlsLabel == "false" {
+			return nil
+		}
+	}
+
 	// Check if TLS is enabled
 	tlsEnabled := false
 	if tlsLabel, exists := service.Config[prefix+".tls"]; exists {
