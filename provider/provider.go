@@ -845,7 +845,9 @@ func applyTCPRouterOptions(router *dynamic.TCPRouter, service internal.Service, 
 	}
 
 	// Handle TLS
-	tls := handleTCPRouterTLS(service, prefix)
+	// Check if rule requires TLS (non-wildcard HostSNI)
+	requiresTLS := requiresTLSForRule(router.Rule)
+	tls := handleTCPRouterTLS(service, prefix, requiresTLS)
 	if tls != nil {
 		router.TLS = tls
 	}
@@ -971,12 +973,26 @@ func getUDPServiceAddress(service internal.Service, serviceName string, nodeName
 	return address
 }
 
+// requiresTLSForRule checks if a TCP router rule requires TLS
+// HostSNI with a specific hostname (not wildcard) requires TLS
+func requiresTLSForRule(rule string) bool {
+	// Check if rule contains HostSNI but not wildcard
+	if strings.Contains(rule, "HostSNI") && !strings.Contains(rule, "HostSNI(`*`)") {
+		return true
+	}
+	return false
+}
+
 // Handle TCP TLS configuration
-func handleTCPRouterTLS(service internal.Service, prefix string) *dynamic.RouterTCPTLSConfig {
+func handleTCPRouterTLS(service internal.Service, prefix string, requiresTLS bool) *dynamic.RouterTCPTLSConfig {
 	// Check if TLS is explicitly disabled
 	if tlsLabel, exists := service.Config[prefix+".tls"]; exists {
 		if tlsLabel == "false" {
-			return nil
+			if requiresTLS {
+				log.Printf("WARNING: TLS is explicitly disabled but rule requires TLS. TLS will be enabled anyway.")
+			} else {
+				return nil
+			}
 		}
 	}
 
@@ -993,6 +1009,11 @@ func handleTCPRouterTLS(service internal.Service, prefix string) *dynamic.Router
 	certResolver, hasCertResolver := service.Config[prefix+".tls.certresolver"]
 	domains, hasDomains := service.Config[prefix+".tls.domains"]
 	options, hasOptions := service.Config[prefix+".tls.options"]
+
+	// Enable TLS if rule requires it (non-wildcard HostSNI)
+	if requiresTLS {
+		tlsEnabled = true
+	}
 
 	if !tlsEnabled && !hasPassthrough && !hasCertResolver && !hasDomains && !hasOptions {
 		return nil
