@@ -241,19 +241,19 @@ func scanServices(client *internal.ProxmoxClient, ctx context.Context, nodeName 
 
 	for _, vm := range vms {
 		log.Printf("Scanning VM %s/%s (%d): %s", nodeName, vm.Name, vm.VMID, vm.Status)
-		
+
 		if vm.Status == "running" {
 			config, err := client.GetVMConfig(ctx, nodeName, vm.VMID)
 			if err != nil {
 				log.Printf("Error getting VM config for %d: %v", vm.VMID, err)
 				continue
 			}
-			
+
 			traefikConfig := config.GetTraefikMap()
 			log.Printf("VM %s (%d) traefik config: %v", vm.Name, vm.VMID, traefikConfig)
-			
+
 			service := internal.NewService(vm.VMID, vm.Name, traefikConfig)
-			
+
 			ips, err := getIPsOfService(client, ctx, nodeName, vm.VMID, false)
 			if err == nil {
 				service.IPs = ips
@@ -328,99 +328,232 @@ func generateConfiguration(servicesMap map[string][]internal.Service) *dynamic.C
 				log.Printf("Skipping service %s (ID: %d) because traefik.enable is not true", service.Name, service.ID)
 				continue
 			}
-			
+
 			// Extract router and service names from labels
-			routerPrefixMap := make(map[string]bool)
-			servicePrefixMap := make(map[string]bool)
-			
+			httpRouterPrefixMap := make(map[string]bool)
+			httpServicePrefixMap := make(map[string]bool)
+			tcpRouterPrefixMap := make(map[string]bool)
+			tcpServicePrefixMap := make(map[string]bool)
+			udpRouterPrefixMap := make(map[string]bool)
+			udpServicePrefixMap := make(map[string]bool)
+
 			for k := range service.Config {
 				if strings.HasPrefix(k, "traefik.http.routers.") {
 					parts := strings.Split(k, ".")
 					if len(parts) > 3 {
-						routerPrefixMap[parts[3]] = true
+						httpRouterPrefixMap[parts[3]] = true
 					}
 				}
 				if strings.HasPrefix(k, "traefik.http.services.") {
 					parts := strings.Split(k, ".")
 					if len(parts) > 3 {
-						servicePrefixMap[parts[3]] = true
+						httpServicePrefixMap[parts[3]] = true
+					}
+				}
+				if strings.HasPrefix(k, "traefik.tcp.routers.") {
+					parts := strings.Split(k, ".")
+					if len(parts) > 3 {
+						tcpRouterPrefixMap[parts[3]] = true
+					}
+				}
+				if strings.HasPrefix(k, "traefik.tcp.services.") {
+					parts := strings.Split(k, ".")
+					if len(parts) > 3 {
+						tcpServicePrefixMap[parts[3]] = true
+					}
+				}
+				if strings.HasPrefix(k, "traefik.udp.routers.") {
+					parts := strings.Split(k, ".")
+					if len(parts) > 3 {
+						udpRouterPrefixMap[parts[3]] = true
+					}
+				}
+				if strings.HasPrefix(k, "traefik.udp.services.") {
+					parts := strings.Split(k, ".")
+					if len(parts) > 3 {
+						udpServicePrefixMap[parts[3]] = true
 					}
 				}
 			}
-			
+
 			// Default to service ID if no names found
 			defaultID := fmt.Sprintf("%s-%d", service.Name, service.ID)
-			
+
 			// Convert maps to slices
-			routerNames := mapKeysToSlice(routerPrefixMap)
-			serviceNames := mapKeysToSlice(servicePrefixMap)
-			
-			// Use defaults if no names found
-			if len(routerNames) == 0 {
-				routerNames = []string{defaultID}
+			httpRouterNames := mapKeysToSlice(httpRouterPrefixMap)
+			httpServiceNames := mapKeysToSlice(httpServicePrefixMap)
+			tcpRouterNames := mapKeysToSlice(tcpRouterPrefixMap)
+			tcpServiceNames := mapKeysToSlice(tcpServicePrefixMap)
+			udpRouterNames := mapKeysToSlice(udpRouterPrefixMap)
+			udpServiceNames := mapKeysToSlice(udpServicePrefixMap)
+
+			// Use defaults if no names found and HTTP is default protocol
+			if len(httpRouterNames) == 0 && len(tcpRouterNames) == 0 && len(udpRouterNames) == 0 {
+				httpRouterNames = []string{defaultID}
 			}
-			if len(serviceNames) == 0 {
-				serviceNames = []string{defaultID}
+			if len(httpServiceNames) == 0 && len(tcpServiceNames) == 0 && len(udpServiceNames) == 0 {
+				httpServiceNames = []string{defaultID}
 			}
-			
-			// Create services
-			for _, serviceName := range serviceNames {
+
+			// Create HTTP services
+			for _, serviceName := range httpServiceNames {
 				// Configure load balancer options
 				loadBalancer := &dynamic.ServersLoadBalancer{
 					PassHostHeader: boolPtr(true), // Default is true
 					Servers:        []dynamic.Server{},
 				}
-				
+
 				// Apply service options
-				applyServiceOptions(loadBalancer, service, serviceName)
-				
+				applyHTTPServiceOptions(loadBalancer, service, serviceName)
+
 				// Add server URL(s)
-				serverURL := getServiceURL(service, serviceName, nodeName)
+				serverURL := getHTTPServiceURL(service, serviceName, nodeName)
 				loadBalancer.Servers = append(loadBalancer.Servers, dynamic.Server{
 					URL: serverURL,
 				})
-				
+
 				config.HTTP.Services[serviceName] = &dynamic.Service{
 					LoadBalancer: loadBalancer,
 				}
 			}
-			
-			// Create routers
-			for _, routerName := range routerNames {
+
+			// Create TCP services
+			for _, serviceName := range tcpServiceNames {
+				// Configure TCP load balancer
+				tcpLoadBalancer := &dynamic.TCPServersLoadBalancer{
+					Servers: []dynamic.TCPServer{},
+				}
+
+				// Apply TCP service options
+				applyTCPServiceOptions(tcpLoadBalancer, service, serviceName)
+
+				// Add TCP server
+				serverAddress := getTCPServiceAddress(service, serviceName, nodeName)
+				tcpLoadBalancer.Servers = append(tcpLoadBalancer.Servers, dynamic.TCPServer{
+					Address: serverAddress,
+				})
+
+				config.TCP.Services[serviceName] = &dynamic.TCPService{
+					LoadBalancer: tcpLoadBalancer,
+				}
+			}
+
+			// Create UDP services
+			for _, serviceName := range udpServiceNames {
+				// Configure UDP load balancer
+				udpLoadBalancer := &dynamic.UDPServersLoadBalancer{
+					Servers: []dynamic.UDPServer{},
+				}
+
+				// Apply UDP service options
+				applyUDPServiceOptions(udpLoadBalancer, service, serviceName)
+
+				// Add UDP server
+				serverAddress := getUDPServiceAddress(service, serviceName, nodeName)
+				udpLoadBalancer.Servers = append(udpLoadBalancer.Servers, dynamic.UDPServer{
+					Address: serverAddress,
+				})
+
+				config.UDP.Services[serviceName] = &dynamic.UDPService{
+					LoadBalancer: udpLoadBalancer,
+				}
+			}
+
+			// Create HTTP routers
+			for _, routerName := range httpRouterNames {
+				if len(httpServiceNames) == 0 {
+					log.Printf("Skipping HTTP router %s because no HTTP services were created", routerName)
+					continue
+				}
+
 				// Get router rule
-				rule := getRouterRule(service, routerName)
-				
+				rule := getHTTPRouterRule(service, routerName)
+
 				// Find target service (prefer explicit mapping)
-				targetService := serviceNames[0]
+				targetService := httpServiceNames[0]
 				serviceLabel := fmt.Sprintf("traefik.http.routers.%s.service", routerName)
 				if val, exists := service.Config[serviceLabel]; exists {
 					targetService = val
 				}
-				
+
 				// Create basic router
 				router := &dynamic.Router{
 					Service:  targetService,
 					Rule:     rule,
 					Priority: 1, // Default priority
 				}
-				
+
 				// Apply additional router options from labels
-				applyRouterOptions(router, service, routerName)
-				
+				applyHTTPRouterOptions(router, service, routerName)
+
 				config.HTTP.Routers[routerName] = router
 			}
-			
+
+			// Create TCP routers
+			for _, routerName := range tcpRouterNames {
+				if len(tcpServiceNames) == 0 {
+					log.Printf("Skipping TCP router %s because no TCP services were created", routerName)
+					continue
+				}
+
+				// Get router rule
+				rule := getTCPRouterRule(service, routerName)
+
+				// Find target service (prefer explicit mapping)
+				targetService := tcpServiceNames[0]
+				serviceLabel := fmt.Sprintf("traefik.tcp.routers.%s.service", routerName)
+				if val, exists := service.Config[serviceLabel]; exists {
+					targetService = val
+				}
+
+				// Create basic TCP router
+				tcpRouter := &dynamic.TCPRouter{
+					Service: targetService,
+					Rule:    rule,
+				}
+
+				// Apply additional TCP router options from labels
+				applyTCPRouterOptions(tcpRouter, service, routerName)
+
+				config.TCP.Routers[routerName] = tcpRouter
+			}
+
+			// Create UDP routers
+			for _, routerName := range udpRouterNames {
+				if len(udpServiceNames) == 0 {
+					log.Printf("Skipping UDP router %s because no UDP services were created", routerName)
+					continue
+				}
+
+				// Find target service (prefer explicit mapping)
+				targetService := udpServiceNames[0]
+				serviceLabel := fmt.Sprintf("traefik.udp.routers.%s.service", routerName)
+				if val, exists := service.Config[serviceLabel]; exists {
+					targetService = val
+				}
+
+				// Create basic UDP router
+				udpRouter := &dynamic.UDPRouter{
+					Service: targetService,
+				}
+
+				// Apply additional UDP router options from labels
+				applyUDPRouterOptions(udpRouter, service, routerName)
+
+				config.UDP.Routers[routerName] = udpRouter
+			}
+
 			log.Printf("Created router and service for %s (ID: %d)", service.Name, service.ID)
 		}
 	}
-	
+
 	return config
 }
 
-// Apply router configuration options from labels
-func applyRouterOptions(router *dynamic.Router, service internal.Service, routerName string) {
+// Apply HTTP router configuration options from labels
+func applyHTTPRouterOptions(router *dynamic.Router, service internal.Service, routerName string) {
 	prefix := fmt.Sprintf("traefik.http.routers.%s", routerName)
-	
+
 	// Handle EntryPoints
 	if entrypoints, exists := service.Config[prefix+".entrypoints"]; exists {
 		// Backward compatibility with singular form
@@ -428,19 +561,19 @@ func applyRouterOptions(router *dynamic.Router, service internal.Service, router
 	} else if entrypoint, exists := service.Config[prefix+".entrypoint"]; exists {
 		router.EntryPoints = []string{entrypoint}
 	}
-	
+
 	// Handle Middlewares
 	if middlewares, exists := service.Config[prefix+".middlewares"]; exists {
 		router.Middlewares = strings.Split(middlewares, ",")
 	}
-	
+
 	// Handle Priority
 	if priority, exists := service.Config[prefix+".priority"]; exists {
 		if p, err := stringToInt(priority); err == nil {
 			router.Priority = p
 		}
 	}
-	
+
 	// Handle TLS
 	tls := handleRouterTLS(service, prefix)
 	if tls != nil {
@@ -448,34 +581,34 @@ func applyRouterOptions(router *dynamic.Router, service internal.Service, router
 	}
 }
 
-// Apply service configuration options from labels
-func applyServiceOptions(lb *dynamic.ServersLoadBalancer, service internal.Service, serviceName string) {
+// Apply HTTP service configuration options from labels
+func applyHTTPServiceOptions(lb *dynamic.ServersLoadBalancer, service internal.Service, serviceName string) {
 	prefix := fmt.Sprintf("traefik.http.services.%s.loadbalancer", serviceName)
-	
+
 	// Handle PassHostHeader
 	if passHostHeader, exists := service.Config[prefix+".passhostheader"]; exists {
 		if val, err := stringToBool(passHostHeader); err == nil {
 			lb.PassHostHeader = &val
 		}
 	}
-	
+
 	// Handle HealthCheck
 	if healthcheckPath, exists := service.Config[prefix+".healthcheck.path"]; exists {
 		hc := &dynamic.ServerHealthCheck{
 			Path: healthcheckPath,
 		}
-		
+
 		if interval, exists := service.Config[prefix+".healthcheck.interval"]; exists {
 			hc.Interval = interval
 		}
-		
+
 		if timeout, exists := service.Config[prefix+".healthcheck.timeout"]; exists {
 			hc.Timeout = timeout
 		}
-		
+
 		lb.HealthCheck = hc
 	}
-	
+
 	// Handle Sticky Sessions
 	if cookieName, exists := service.Config[prefix+".sticky.cookie.name"]; exists {
 		sticky := &dynamic.Sticky{
@@ -483,22 +616,22 @@ func applyServiceOptions(lb *dynamic.ServersLoadBalancer, service internal.Servi
 				Name: cookieName,
 			},
 		}
-		
+
 		if secure, exists := service.Config[prefix+".sticky.cookie.secure"]; exists {
 			if val, err := stringToBool(secure); err == nil {
 				sticky.Cookie.Secure = val
 			}
 		}
-		
+
 		if httpOnly, exists := service.Config[prefix+".sticky.cookie.httponly"]; exists {
 			if val, err := stringToBool(httpOnly); err == nil {
 				sticky.Cookie.HTTPOnly = val
 			}
 		}
-		
+
 		lb.Sticky = sticky
 	}
-	
+
 	// Handle ResponseForwarding
 	if flushInterval, exists := service.Config[prefix+".responseforwarding.flushinterval"]; exists {
 		lb.ResponseForwarding = &dynamic.ResponseForwarding{
@@ -516,29 +649,29 @@ func handleRouterTLS(service internal.Service, prefix string) *dynamic.RouterTLS
 			tlsEnabled = true
 		}
 	}
-	
+
 	// If specific TLS settings exist, TLS is implicitly enabled
 	certResolver, hasCertResolver := service.Config[prefix+".tls.certresolver"]
 	domains, hasDomains := service.Config[prefix+".tls.domains"]
 	options, hasOptions := service.Config[prefix+".tls.options"]
-	
+
 	if !tlsEnabled && !hasCertResolver && !hasDomains && !hasOptions {
 		return nil
 	}
-	
+
 	// Create TLS config
 	tlsConfig := &dynamic.RouterTLSConfig{}
-	
+
 	// Add cert resolver if specified
 	if hasCertResolver {
 		tlsConfig.CertResolver = certResolver
 	}
-	
+
 	// Add options if specified
 	if hasOptions {
 		tlsConfig.Options = options
 	}
-	
+
 	// Add domains if specified
 	if hasDomains {
 		// Split domains by comma
@@ -551,12 +684,12 @@ func handleRouterTLS(service internal.Service, prefix string) *dynamic.RouterTLS
 			tlsConfig.Domains = append(tlsConfig.Domains, domainConfig)
 		}
 	}
-	
+
 	return tlsConfig
 }
 
-// Helper to get service URL with correct port
-func getServiceURL(service internal.Service, serviceName string, nodeName string) string {
+// Helper to get HTTP service URL with correct port
+func getHTTPServiceURL(service internal.Service, serviceName string, nodeName string) string {
 	// Check for direct URL override
 	urlLabel := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.url", serviceName)
 	if url, exists := service.Config[urlLabel]; exists {
@@ -566,7 +699,7 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 	// Default protocol and port
 	protocol := "http"
 	port := "80"
-	
+
 	// Check for HTTPS protocol setting
 	httpsLabel := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.scheme", serviceName)
 	if scheme, exists := service.Config[httpsLabel]; exists && scheme == "https" {
@@ -574,7 +707,7 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 		// Update default port for HTTPS
 		port = "443"
 	}
-	
+
 	// Look for service-specific port
 	portLabel := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", serviceName)
 	if val, exists := service.Config[portLabel]; exists {
@@ -586,7 +719,7 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 	if val, exists := service.Config[ipLabel]; exists {
 		return fmt.Sprintf("%s://%s:%s", protocol, val, port)
 	}
-	
+
 	// Use IP if available, otherwise fall back to hostname
 	if len(service.IPs) > 0 {
 		// Create a list of server URLs from all IPs
@@ -596,24 +729,24 @@ func getServiceURL(service internal.Service, serviceName string, nodeName string
 			}
 		}
 	}
-	
+
 	// Fall back to hostname
 	url := fmt.Sprintf("%s://%s.%s:%s", protocol, service.Name, nodeName, port)
 	log.Printf("No IPs found, using hostname URL %s for service %s (ID: %d)", url, service.Name, service.ID)
 	return url
 }
 
-// Helper to get router rule
-func getRouterRule(service internal.Service, routerName string) string {
+// Helper to get HTTP router rule
+func getHTTPRouterRule(service internal.Service, routerName string) string {
 	// Default rule
 	rule := fmt.Sprintf("Host(`%s`)", service.Name)
-	
+
 	// Look for router-specific rule
 	ruleLabel := fmt.Sprintf("traefik.http.routers.%s.rule", routerName)
 	if val, exists := service.Config[ruleLabel]; exists {
 		rule = val
 	}
-	
+
 	return rule
 }
 
@@ -679,4 +812,210 @@ func validateConfig(config *Config) error {
 func isBoolLabelEnabled(labels map[string]string, label string) bool {
 	val, exists := labels[label]
 	return exists && val == "true"
+}
+
+// Apply TCP router configuration options from labels
+func applyTCPRouterOptions(router *dynamic.TCPRouter, service internal.Service, routerName string) {
+	prefix := fmt.Sprintf("traefik.tcp.routers.%s", routerName)
+
+	// Handle EntryPoints
+	if entrypoints, exists := service.Config[prefix+".entrypoints"]; exists {
+		router.EntryPoints = strings.Split(entrypoints, ",")
+	} else if entrypoint, exists := service.Config[prefix+".entrypoint"]; exists {
+		router.EntryPoints = []string{entrypoint}
+	}
+
+	// Handle Middlewares
+	if middlewares, exists := service.Config[prefix+".middlewares"]; exists {
+		router.Middlewares = strings.Split(middlewares, ",")
+	}
+
+	// Handle Priority
+	if priority, exists := service.Config[prefix+".priority"]; exists {
+		if p, err := stringToInt(priority); err == nil {
+			router.Priority = p
+		}
+	}
+
+	// Handle TLS
+	tls := handleTCPRouterTLS(service, prefix)
+	if tls != nil {
+		router.TLS = tls
+	}
+}
+
+// Apply UDP router configuration options from labels
+func applyUDPRouterOptions(router *dynamic.UDPRouter, service internal.Service, routerName string) {
+	prefix := fmt.Sprintf("traefik.udp.routers.%s", routerName)
+
+	// Handle EntryPoints
+	if entrypoints, exists := service.Config[prefix+".entrypoints"]; exists {
+		router.EntryPoints = strings.Split(entrypoints, ",")
+	} else if entrypoint, exists := service.Config[prefix+".entrypoint"]; exists {
+		router.EntryPoints = []string{entrypoint}
+	}
+}
+
+// Apply TCP service configuration options from labels
+func applyTCPServiceOptions(lb *dynamic.TCPServersLoadBalancer, service internal.Service, serviceName string) {
+	prefix := fmt.Sprintf("traefik.tcp.services.%s.loadbalancer", serviceName)
+
+	// Handle TerminationDelay
+	if terminationDelay, exists := service.Config[prefix+".terminationdelay"]; exists {
+		if delay, err := stringToInt(terminationDelay); err == nil {
+			lb.TerminationDelay = &delay
+		}
+	}
+
+	// Handle ProxyProtocol
+	if proxyProtocol, exists := service.Config[prefix+".proxyprotocol.version"]; exists {
+		if version, err := stringToInt(proxyProtocol); err == nil {
+			lb.ProxyProtocol = &dynamic.ProxyProtocol{
+				Version: version,
+			}
+		}
+	}
+}
+
+// Apply UDP service configuration options from labels
+func applyUDPServiceOptions(lb *dynamic.UDPServersLoadBalancer, service internal.Service, serviceName string) {
+	// UDP load balancers currently have limited configuration options in Traefik
+	// This function is provided for future extensibility
+	_ = lb
+	_ = service
+	_ = serviceName
+}
+
+// Helper to get TCP router rule
+func getTCPRouterRule(service internal.Service, routerName string) string {
+	// Default rule for TCP - use HostSNI
+	rule := "HostSNI(`*`)"
+
+	// Look for router-specific rule
+	ruleLabel := fmt.Sprintf("traefik.tcp.routers.%s.rule", routerName)
+	if val, exists := service.Config[ruleLabel]; exists {
+		rule = val
+	}
+
+	return rule
+}
+
+// Helper to get TCP service address with correct port
+func getTCPServiceAddress(service internal.Service, serviceName string, nodeName string) string {
+	// Check for direct address override
+	addressLabel := fmt.Sprintf("traefik.tcp.services.%s.loadbalancer.server.address", serviceName)
+	if address, exists := service.Config[addressLabel]; exists {
+		return address
+	}
+
+	// Default port
+	port := "443"
+
+	// Look for service-specific port
+	portLabel := fmt.Sprintf("traefik.tcp.services.%s.loadbalancer.server.port", serviceName)
+	if val, exists := service.Config[portLabel]; exists {
+		port = val
+	}
+
+	// Use IP if available, otherwise fall back to hostname
+	if len(service.IPs) > 0 {
+		for _, ip := range service.IPs {
+			if ip.Address != "" {
+				return fmt.Sprintf("%s:%s", ip.Address, port)
+			}
+		}
+	}
+
+	// Fall back to hostname
+	address := fmt.Sprintf("%s.%s:%s", service.Name, nodeName, port)
+	log.Printf("No IPs found, using hostname address %s for TCP service %s (ID: %d)", address, service.Name, service.ID)
+	return address
+}
+
+// Helper to get UDP service address with correct port
+func getUDPServiceAddress(service internal.Service, serviceName string, nodeName string) string {
+	// Check for direct address override
+	addressLabel := fmt.Sprintf("traefik.udp.services.%s.loadbalancer.server.address", serviceName)
+	if address, exists := service.Config[addressLabel]; exists {
+		return address
+	}
+
+	// Default port
+	port := "53"
+
+	// Look for service-specific port
+	portLabel := fmt.Sprintf("traefik.udp.services.%s.loadbalancer.server.port", serviceName)
+	if val, exists := service.Config[portLabel]; exists {
+		port = val
+	}
+
+	// Use IP if available, otherwise fall back to hostname
+	if len(service.IPs) > 0 {
+		for _, ip := range service.IPs {
+			if ip.Address != "" {
+				return fmt.Sprintf("%s:%s", ip.Address, port)
+			}
+		}
+	}
+
+	// Fall back to hostname
+	address := fmt.Sprintf("%s.%s:%s", service.Name, nodeName, port)
+	log.Printf("No IPs found, using hostname address %s for UDP service %s (ID: %d)", address, service.Name, service.ID)
+	return address
+}
+
+// Handle TCP TLS configuration
+func handleTCPRouterTLS(service internal.Service, prefix string) *dynamic.RouterTCPTLSConfig {
+	// Check if TLS is enabled
+	tlsEnabled := false
+	if tlsLabel, exists := service.Config[prefix+".tls"]; exists {
+		if tlsLabel == "true" {
+			tlsEnabled = true
+		}
+	}
+
+	// If specific TLS settings exist, TLS is implicitly enabled
+	passthrough, hasPassthrough := service.Config[prefix+".tls.passthrough"]
+	certResolver, hasCertResolver := service.Config[prefix+".tls.certresolver"]
+	domains, hasDomains := service.Config[prefix+".tls.domains"]
+	options, hasOptions := service.Config[prefix+".tls.options"]
+
+	if !tlsEnabled && !hasPassthrough && !hasCertResolver && !hasDomains && !hasOptions {
+		return nil
+	}
+
+	// Create TLS config
+	tlsConfig := &dynamic.RouterTCPTLSConfig{}
+
+	// Add passthrough setting
+	if hasPassthrough {
+		if val, err := stringToBool(passthrough); err == nil {
+			tlsConfig.Passthrough = val
+		}
+	}
+
+	// Add cert resolver if specified
+	if hasCertResolver {
+		tlsConfig.CertResolver = certResolver
+	}
+
+	// Add options if specified
+	if hasOptions {
+		tlsConfig.Options = options
+	}
+
+	// Add domains if specified
+	if hasDomains {
+		// Split domains by comma
+		domainList := strings.Split(domains, ",")
+		for _, domain := range domainList {
+			// Create a domain config with Main domain set
+			domainConfig := types.Domain{
+				Main: domain,
+			}
+			tlsConfig.Domains = append(tlsConfig.Domains, domainConfig)
+		}
+	}
+
+	return tlsConfig
 }

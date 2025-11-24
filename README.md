@@ -8,7 +8,7 @@ A Traefik provider that automatically configures routing based on Proxmox VE vir
 
 - Automatically discovers Proxmox VE virtual machines and containers
 - Configures routing based on VM/container metadata
-- Supports both HTTP and HTTPS endpoints
+- Supports HTTP, HTTPS, TCP, and UDP endpoints
 - Configurable polling interval
 - SSL validation options
 - Logging configuration
@@ -98,8 +98,17 @@ The provider looks for Traefik labels in the VM/container notes field. Each line
 
 ### Common Labels
 
+#### HTTP Services
 - `traefik.http.routers.<name>.rule=Host(`myapp.example.com`)` - The router rule for this service
 - `traefik.http.services.<name>.loadbalancer.server.port=8080` - The port to route traffic to (defaults to 80)
+
+#### TCP Services
+- `traefik.tcp.routers.<name>.rule=HostSNI(`myapp.example.com`)` - The TCP router rule for this service
+- `traefik.tcp.services.<name>.loadbalancer.server.port=443` - The port to route TCP traffic to (defaults to 443)
+
+#### UDP Services
+- `traefik.udp.routers.<name>.service=<service-name>` - Links UDP router to a service
+- `traefik.udp.services.<name>.loadbalancer.server.port=53` - The port to route UDP traffic to (defaults to 53)
 
 ### Advanced Label Examples
 
@@ -155,6 +164,33 @@ traefik.http.services.myservice.loadbalancer.sticky.cookie.httponly=true
 traefik.http.services.myservice.loadbalancer.server.scheme=https
 ```
 
+#### TCP-specific Options
+
+```
+traefik.tcp.services.myservice.loadbalancer.terminationdelay=100
+traefik.tcp.services.myservice.loadbalancer.proxyprotocol.version=2
+traefik.tcp.routers.myrouter.middlewares=ipwhitelist@file
+```
+
+#### Advanced Mixed Protocol Setup
+
+```
+traefik.enable=true
+# HTTP service
+traefik.http.routers.web.rule=Host(`app.example.com`)
+traefik.http.routers.web.entrypoints=websecure
+traefik.http.routers.web.tls=true
+traefik.http.services.web.loadbalancer.server.port=8080
+# TCP service for database
+traefik.tcp.routers.db.rule=HostSNI(`app.example.com`)
+traefik.tcp.routers.db.entrypoints=database
+traefik.tcp.routers.db.tls.passthrough=true
+traefik.tcp.services.db.loadbalancer.server.port=5432
+# UDP service for monitoring
+traefik.udp.routers.metrics.entrypoints=metrics
+traefik.udp.services.metrics.loadbalancer.server.port=8125
+```
+
 ### Full Example of VM/Container Notes
 
 ```
@@ -176,10 +212,13 @@ traefik.http.services.myapp.loadbalancer.healthcheck.path=/health
 1. The provider connects to your Proxmox VE cluster via API
 2. It discovers all running VMs and containers on all nodes
 3. For each VM/container, it reads the notes field looking for Traefik labels
-4. If `traefik.enable=true` is found, it creates a Traefik router and service
-5. The provider attempts to get IP addresses for the VM/container 
-6. If IPs are found, they're used as server URLs; otherwise, the VM/container hostname is used
-7. This process repeats according to the configured poll interval
+4. If `traefik.enable=true` is found, it analyzes the labels to determine which protocols to configure
+5. Based on label prefixes (`traefik.http.*`, `traefik.tcp.*`, `traefik.udp.*`), it creates appropriate routers and services
+6. The provider attempts to get IP addresses for the VM/container
+7. For HTTP/HTTPS: IPs are used as server URLs (e.g., `http://192.168.1.10:8080`)
+8. For TCP/UDP: IPs are used as server addresses (e.g., `192.168.1.10:5432`)
+9. If no IPs are found, hostnames are used as fallback
+10. This process repeats according to the configured poll interval
 
 ## Examples
 
@@ -198,6 +237,8 @@ providers:
 ```
 
 ### VM/Container Label Examples
+
+#### HTTP Examples
 
 Simple web server:
 ```
@@ -227,6 +268,61 @@ Multiple hosts with path-based routing:
 traefik.enable=true
 traefik.http.routers.multi.rule=Host(`example.com`,`www.example.com`) && PathPrefix(`/api`)
 traefik.http.routers.multi.priority=100
+```
+
+#### TCP Examples
+
+TCP service with TLS passthrough:
+```
+traefik.enable=true
+traefik.tcp.routers.db.rule=HostSNI(`db.example.com`)
+traefik.tcp.routers.db.entrypoints=db-tcp
+traefik.tcp.routers.db.tls.passthrough=true
+traefik.tcp.services.db.loadbalancer.server.port=5432
+```
+
+HTTPS with TLS termination at Traefik:
+```
+traefik.enable=true
+traefik.tcp.routers.https.rule=HostSNI(`app.example.com`)
+traefik.tcp.routers.https.entrypoints=websecure
+traefik.tcp.routers.https.tls=true
+traefik.tcp.routers.https.tls.certresolver=dnschallenge
+traefik.tcp.services.https.loadbalancer.server.port=8443
+```
+
+SSH service:
+```
+traefik.enable=true
+traefik.tcp.routers.ssh.rule=HostSNI(`*`)
+traefik.tcp.routers.ssh.entrypoints=ssh
+traefik.tcp.services.ssh.loadbalancer.server.port=22
+```
+
+#### UDP Examples
+
+DNS server:
+```
+traefik.enable=true
+traefik.udp.routers.dns.entrypoints=dns
+traefik.udp.routers.dns.service=dns-service
+traefik.udp.services.dns-service.loadbalancer.server.port=53
+```
+
+Game server:
+```
+traefik.enable=true
+traefik.udp.routers.game.entrypoints=game-udp
+traefik.udp.routers.game.service=game-service
+traefik.udp.services.game-service.loadbalancer.server.port=7777
+```
+
+DHCP server:
+```
+traefik.enable=true
+traefik.udp.routers.dhcp.entrypoints=dhcp
+traefik.udp.routers.dhcp.service=dhcp-service
+traefik.udp.services.dhcp-service.loadbalancer.server.port=67
 ```
 
 ## Troubleshooting

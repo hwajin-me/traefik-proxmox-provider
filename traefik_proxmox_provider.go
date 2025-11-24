@@ -70,4 +70,4 @@ func (p *Provider) Provide(cfgChan chan<- json.Marshaler) error {
 // Stop the provider.
 func (p *Provider) Stop() error {
 	return p.provider.Stop()
-} 
+}
