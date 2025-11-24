@@ -1,4 +1,4 @@
-module github.com/NX211/traefik-proxmox-provider
+module github.com/hwajin-me/traefik-proxmox-provider
 
 go 1.19
 

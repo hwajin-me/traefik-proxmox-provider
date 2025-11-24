@@ -22,8 +22,8 @@ A Traefik provider that automatically configures routing based on Proxmox VE vir
 experimental:
   plugins:
     traefik-proxmox-provider:
-      moduleName: github.com/NX211/traefik-proxmox-provider
-      version: v0.7.0
+      moduleName: github.com/hwajin-me/traefik-proxmox-provider
+      version: v0.8.0
 ```
 
 2. Configure the provider in your dynamic configuration:

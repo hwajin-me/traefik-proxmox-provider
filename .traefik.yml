@@ -2,7 +2,7 @@ displayName: Traefik Proxmox Provider
 type: provider
 iconPath: .assets/logo.png
 
-import: github.com/NX211/traefik-proxmox-provider
+import: github.com/hwajin-me/traefik-proxmox-provider
 
 summary: 'Traefik Proxmox Provider - A Traefik provider that automatically configures routing based on Proxmox VE virtual machines and containers'
 
